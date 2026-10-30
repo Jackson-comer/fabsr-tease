@@ -1,0 +1,446 @@
+{
+ "project": "Fabsr: a weight-flip optimizer that trains ternary (-1/0/+1) LLMs stored as 2-bit codes, with no latent full-precision weights",
+ "how_it_works_steps": [
+  "Each trainable weight is -1, 0 or +1, stored as a 2-bit code (4 weights per byte). There is no full-precision copy of these weights.",
+  "Forward and backward run as normal. In backward, each matrix computes its dense weight gradient and hands it to the optimizer, then drops it.",
+  "The optimizer keeps a bf16 momentum (an exponential average of the gradient, with stochastic rounding) and a factored second-moment estimate (one vector per row and per column).",
+  "Every few steps it computes a signal score per weight (momentum divided by the noise estimate) and picks a threshold so that only a small fraction of weights (the 'flip rate', about 1e-5 per step) is flipped.",
+  "Weights above the threshold move one level toward the signal (-1 -> 0 -> +1) and their momentum resets. Everything else stays untouched. Embeddings, norms and the output head are frozen."
+ ],
+ "hardware": {
+  "local": "RTX 4060 8 GB (Windows), all LLM training runs",
+  "rented": "RTX 4090 24 GB (Vast.ai) for one speed sweep; the 350M quality study ran on a separate RTX 4070 per its notes"
+ },
+ "study_a_350m_quality": {
+  "setup": "350M model, 14,000 steps, 28.7M tokens, same data order and schedule, single seed. Run-to-run noise about 0.015. Fabsr row is the unfused PyTorch version.",
+  "results": {
+   "Latent Adam": {
+    "final_loss": 4.2462,
+    "minutes": 36.2,
+    "tok_s": 13213.0,
+    "peak_gb": 9.03
+   },
+   "Bop F3": {
+    "final_loss": 4.2962,
+    "minutes": 30.7,
+    "tok_s": 15545.0,
+    "peak_gb": 5.42
+   },
+   "Bop F3+SR": {
+    "final_loss": 4.2596,
+    "minutes": 30.7,
+    "tok_s": 15546.0,
+    "peak_gb": 5.42
+   },
+   "Bop F1": {
+    "final_loss": 4.416,
+    "minutes": 31.0,
+    "tok_s": 15401.0,
+    "peak_gb": 3.97
+   },
+   "Bop factored": {
+    "final_loss": 4.2838,
+    "minutes": 35.5,
+    "tok_s": 13458.0,
+    "peak_gb": 3.99
+   },
+   "Fabsr": {
+    "final_loss": 4.2703,
+    "minutes": 43.3,
+    "tok_s": 11045.0,
+    "peak_gb": 3.97
+   },
+   "Latent Lion": {
+    "final_loss": 4.3755,
+    "minutes": 28.6,
+    "tok_s": 16719.0,
+    "peak_gb": 5.4
+   }
+  },
+  "kernel_in_this_run": {
+   "Fabsr": "unfused PyTorch hook (factored second moment + stochastic rounding)",
+   "Bop factored": "unfused PyTorch hook",
+   "other rows": "not re-checked here"
+  },
+  "rough_fused_correction": {
+   "Fabsr": {
+    "measured_tokens_per_s_unfused": 11045,
+    "fused_over_unfused_speed_ratio": 1.39,
+    "ratio_measured_at": "135M model, 3,000 steps, batch 8 (17,332 vs 12,476 tok/s)",
+    "estimated_tokens_per_s_fused": 15300,
+    "estimated_minutes_fused": 31.5,
+    "estimated_vs_adam": "about 1.15x Adam (13,213 tok/s); consistent with the fused benchmark, where Fabsr is 1.11-1.14x Adam at batch 8 to 16 on a 4090 at 350M"
+   }
+  },
+  "disclaimers": [
+   "The speed correction is an estimate, not a measurement: the 1.39x ratio came from a 135M model and may not transfer exactly to 350M.",
+   "Fusing the kernel did not change the loss at 135M (5.1907 fused vs 5.1943 unfused after 3,000 steps), but no full 350M quality run has been repeated with the fused kernel.",
+   "The quality study and the speed benchmark ran on different machines, so the corrected speed is a bridge between two experiments, not one clean run.",
+   "Loss values are single-seed with about 0.015 run-to-run noise."
+  ]
+ },
+ "study_b_speed_vram_batch8": {
+  "note": "Fused kernels, synthetic tokens, batch 8. opt_state_gb is optimizer memory.",
+  "RTX 4060 8 GB, 135M": {
+   "Latent Adam": {
+    "tokens_per_s": 15652,
+    "peak_gb": 4.15,
+    "opt_state_gb": 1.08
+   },
+   "Latent Lion": {
+    "tokens_per_s": 18131,
+    "peak_gb": 2.8,
+    "opt_state_gb": 0.27
+   },
+   "Bop F3+SR": {
+    "tokens_per_s": 15830,
+    "peak_gb": 2.88,
+    "opt_state_gb": 0.81
+   },
+   "Fabsr": {
+    "tokens_per_s": 18288,
+    "peak_gb": 2.32,
+    "opt_state_gb": 0.27
+   }
+  },
+  "RTX 4060 8 GB, 350M": {
+   "Latent Adam": {
+    "status": "does not fit (spill or out of memory)"
+   },
+   "Latent Lion": {
+    "tokens_per_s": 7829,
+    "peak_gb": 5.39,
+    "opt_state_gb": 0.71
+   },
+   "Bop F3+SR": {
+    "tokens_per_s": 7273,
+    "peak_gb": 5.43,
+    "opt_state_gb": 2.12
+   },
+   "Fabsr": {
+    "tokens_per_s": 8104,
+    "peak_gb": 3.98,
+    "opt_state_gb": 0.71
+   }
+  },
+  "RTX 4090 24 GB, 135M": {
+   "Latent Adam": {
+    "tokens_per_s": 43882,
+    "peak_gb": 4.15,
+    "opt_state_gb": 1.08
+   },
+   "Latent Lion": {
+    "tokens_per_s": 43326,
+    "peak_gb": 2.8,
+    "opt_state_gb": 0.27
+   },
+   "Bop F3+SR": {
+    "tokens_per_s": 28552,
+    "peak_gb": 2.88,
+    "opt_state_gb": 0.81
+   },
+   "Fabsr": {
+    "tokens_per_s": 33535,
+    "peak_gb": 2.33,
+    "opt_state_gb": 0.27
+   }
+  },
+  "RTX 4090 24 GB, 350M": {
+   "Latent Adam": {
+    "tokens_per_s": 30639,
+    "peak_gb": 9.03,
+    "opt_state_gb": 2.83
+   },
+   "Latent Lion": {
+    "tokens_per_s": 37362,
+    "peak_gb": 5.39,
+    "opt_state_gb": 0.71
+   },
+   "Bop F3+SR": {
+    "tokens_per_s": 30109,
+    "peak_gb": 5.43,
+    "opt_state_gb": 2.12
+   },
+   "Fabsr": {
+    "tokens_per_s": 34070,
+    "peak_gb": 3.98,
+    "opt_state_gb": 0.71
+   }
+  }
+ },
+ "study_b_best_throughput_any_batch": {
+  "RTX 4060 (8 GB)": {
+   "135M": {
+    "Latent Adam": {
+     "tokens_per_s": 16123,
+     "at_batch": 16
+    },
+    "Latent Lion": {
+     "tokens_per_s": 18131,
+     "at_batch": 8
+    },
+    "Bop F3+SR": {
+     "tokens_per_s": 16853,
+     "at_batch": 16
+    },
+    "Fabsr": {
+     "tokens_per_s": 18288,
+     "at_batch": 8
+    }
+   },
+   "350M": {
+    "Latent Adam": {
+     "status": "does not fit"
+    },
+    "Latent Lion": {
+     "tokens_per_s": 7829,
+     "at_batch": 8
+    },
+    "Bop F3+SR": {
+     "tokens_per_s": 7273,
+     "at_batch": 8
+    },
+    "Fabsr": {
+     "tokens_per_s": 8104,
+     "at_batch": 8
+    }
+   }
+  },
+  "RTX 4090 (24 GB)": {
+   "135M": {
+    "Latent Adam": {
+     "tokens_per_s": 78093,
+     "at_batch": 32
+    },
+    "Latent Lion": {
+     "tokens_per_s": 84697,
+     "at_batch": 16
+    },
+    "Bop F3+SR": {
+     "tokens_per_s": 76372,
+     "at_batch": 32
+    },
+    "Fabsr": {
+     "tokens_per_s": 82056,
+     "at_batch": 32
+    }
+   },
+   "350M": {
+    "Latent Adam": {
+     "tokens_per_s": 35200,
+     "at_batch": 16
+    },
+    "Latent Lion": {
+     "tokens_per_s": 39409,
+     "at_batch": 16
+    },
+    "Bop F3+SR": {
+     "tokens_per_s": 37151,
+     "at_batch": 16
+    },
+    "Fabsr": {
+     "tokens_per_s": 40116,
+     "at_batch": 16
+    }
+   }
+  }
+ },
+ "study_c_fused_vs_unfused_135m_3000_steps": {
+  "unfused s0": {
+   "final_val_loss": 5.1943,
+   "tokens_per_s": 12476,
+   "flip_rate": 5.386104591096894e-05,
+   "zero_fraction": 0.329
+  },
+  "fused s0": {
+   "final_val_loss": 5.1907,
+   "tokens_per_s": 17332,
+   "flip_rate": 5.387626786959072e-05,
+   "zero_fraction": 0.329
+  },
+  "fused s1": {
+   "final_val_loss": 5.1873,
+   "tokens_per_s": 17257,
+   "flip_rate": 5.38979433431881e-05,
+   "zero_fraction": 0.329
+  }
+ },
+ "llm_results": {
+  "base_model_capability_untuned": {
+   "TriLM 1.1B (2024 pretrain, 0.97B ternary weights)": {
+    "gsm8k_4shot_100q_pct": 4,
+    "arithmetic_3shot_pct": {
+     "add2": 4,
+     "sub2": 0,
+     "mul": 0,
+     "add3": 0
+    },
+    "wikitext2_loss": 3.311
+   },
+   "Falcon-E-1B (2025 pretrain, 1.59B ternary weights)": {
+    "gsm8k_4shot_100q_pct": 56,
+    "arithmetic_3shot_pct": {
+     "add2": 100,
+     "sub2": 96,
+     "mul": 100,
+     "add3": 100
+    },
+    "wikitext2_loss": 2.843
+   }
+  },
+  "trilm_runs_held_out_loss": {
+   "A: gamma 0.1, flip rate 5e-5 (hot)": [
+    {
+     "step": 0,
+     "held_loss": 1.47,
+     "wikitext_loss": 3.314
+    },
+    {
+     "step": 1500,
+     "held_loss": 1.351,
+     "wikitext_loss": 3.406
+    },
+    {
+     "step": 3000,
+     "held_loss": 1.38,
+     "wikitext_loss": 3.615
+    },
+    {
+     "step": 4500,
+     "held_loss": 1.419,
+     "wikitext_loss": 3.756
+    }
+   ],
+   "B: gamma 0.1, flip rate 1.5e-5": [
+    {
+     "step": 0,
+     "held_loss": 1.351,
+     "wikitext_loss": 3.406
+    },
+    {
+     "step": 1500,
+     "held_loss": 1.313,
+     "wikitext_loss": 3.56
+    },
+    {
+     "step": 3000,
+     "held_loss": 1.273,
+     "wikitext_loss": 3.472
+    },
+    {
+     "step": 4500,
+     "held_loss": 1.27,
+     "wikitext_loss": 3.503
+    },
+    {
+     "step": 6000,
+     "held_loss": 1.276,
+     "wikitext_loss": 3.535
+    },
+    {
+     "step": 7500,
+     "held_loss": 1.288,
+     "wikitext_loss": 3.627
+    },
+    {
+     "step": 9000,
+     "held_loss": 1.292,
+     "wikitext_loss": 3.692
+    },
+    {
+     "step": 10500,
+     "held_loss": 1.301,
+     "wikitext_loss": 3.706
+    },
+    {
+     "step": 12000,
+     "held_loss": 1.31,
+     "wikitext_loss": 3.75
+    },
+    {
+     "step": 13500,
+     "held_loss": 1.309,
+     "wikitext_loss": 3.783
+    },
+    {
+     "step": 15000,
+     "held_loss": 1.31,
+     "wikitext_loss": 3.795
+    }
+   ],
+   "C: gamma 0.025, flip rate 1.5e-5": [
+    {
+     "step": 0,
+     "held_loss": 1.351,
+     "wikitext_loss": 3.406
+    },
+    {
+     "step": 1500,
+     "held_loss": 1.268,
+     "wikitext_loss": 3.551
+    },
+    {
+     "step": 3000,
+     "held_loss": 1.197,
+     "wikitext_loss": 3.448
+    },
+    {
+     "step": 4500,
+     "held_loss": 1.188,
+     "wikitext_loss": 3.51
+    }
+   ]
+  },
+  "falcon_e_run": [
+   {
+    "step": 0,
+    "held_loss": 0.83,
+    "stop_rate": 0.0,
+    "loop_rate": 0.21,
+    "wikitext_loss": 2.843,
+    "gsm8k_zero_shot_40q": 0.17,
+    "arithmetic_zero_shot_48": 0.21
+   },
+   {
+    "step": 1500,
+    "held_loss": 0.732,
+    "stop_rate": 0.75,
+    "loop_rate": 0.0,
+    "wikitext_loss": 2.618,
+    "gsm8k_zero_shot_40q": 0.5,
+    "arithmetic_zero_shot_48": 1.0
+   }
+  ]
+ },
+ "training_speed_and_vram_on_the_4060": {
+  "TriLM 1.1B (0.97B ternary weights)": {
+   "s_per_step": "0.75 to 1.1",
+   "peak_vram_gb": "4.7 to 5.55",
+   "packed_weights_gb": 0.24,
+   "momentum_gb_bf16": 1.94,
+   "tokens_per_batch": "about 2,300"
+  },
+  "Falcon-E-1B (1.59B ternary weights)": {
+   "s_per_step": "1.45 to 1.75 (eval time included)",
+   "peak_vram_gb": "5.0 to 5.68",
+   "packed_weights_gb": 0.4,
+   "momentum_gb_bf16": 3.2,
+   "tokens_per_batch": "about 1,800"
+  }
+ },
+ "what_we_did_in_order": [
+  "Built the packed 2-bit ternary layer and fused flip kernels; tested against the dense version (same flips with the same seeds).",
+  "TriLM 1.1B: taught it invented facts (it absorbed them), then instruct-tuned it (Alpaca, SlimOrca, then SmolTalk); tried DPO (collapsed at a hot rate, then fine at a low one).",
+  "Found the three fixes on TriLM: real chat data, a lower flip rate, and a longer momentum window (held-out loss 1.47 -> 1.19).",
+  "Found the base model could not do math (GSM8K 4%), so switched to Falcon-E-1B (native ternary, 2025 pretrain): GSM8K 56%, arithmetic ~100%.",
+  "Loaded Falcon-E into our packed layers (verified the packing against its bf16 latents) and instruct-tuned it with flips only: arithmetic 21% -> 100%, GSM8K 18% -> 50% zero-shot at step 1500."
+ ],
+ "caveats": [
+  "Study A is single-seed at toy scale (28.7M tokens); Fabsr ends 0.024 behind Adam and the noise is about 0.015.",
+  "Study A's Fabsr row is the unfused version; fused speed and the loss were measured in separate experiments (study B and C).",
+  "No Adam or LoRA baseline exists yet for the LLM fine-tuning results.",
+  "Speed depends on batch size. At each method's best batch Fabsr is about 13% faster than Adam (4060, 135M; 4090, 350M); at batch 8 on the 4090 with the 135M model Adam is clearly faster (43.9k vs 33.5k tok/s). Lion is often the fastest. The memory advantage holds at every batch size.",
+  "Falcon-E evals are small (40 GSM8K questions, 48 arithmetic problems, about +/-8 points).",
+  "A fresh equal benchmark (WikiText-103, 4 methods x 3 seeds on rented 4090s) is planned but not run."
+ ]
+}
